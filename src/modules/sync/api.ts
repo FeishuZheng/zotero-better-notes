@@ -109,8 +109,7 @@ function getSyncStatus(noteId?: number): SyncStatus {
 }
 
 function getMDStatusFromContent(contentRaw: string): MDStatus {
-  contentRaw = contentRaw.replace(/\r\n/g, "\n");
-  const result = contentRaw.match(/^---\n(.*\n)+?---$/gm);
+  contentRaw = contentRaw.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
   const ret: MDStatus = {
     meta: { $version: -1 },
     content: contentRaw,
@@ -118,14 +117,70 @@ function getMDStatusFromContent(contentRaw: string): MDStatus {
     filename: "",
     lastmodify: new Date(0),
   };
-  if (result) {
-    const yaml = result[0].replace(/---/g, "");
-    ret.content = contentRaw.slice(result[0].length);
-    try {
-      ret.meta = YAML.parse(yaml);
-    } catch (e) {
-      ztoolkit.log(e);
+
+  const openingFence = contentRaw.match(/^---[ \t]*\n/);
+  if (!openingFence) {
+    return ret;
+  }
+
+  const yamlStart = openingFence[0].length;
+  let lineStart = yamlStart;
+  let yamlEnd = -1;
+  let contentStart = -1;
+  while (lineStart <= contentRaw.length) {
+    const nextLineBreak = contentRaw.indexOf("\n", lineStart);
+    const lineEnd = nextLineBreak === -1 ? contentRaw.length : nextLineBreak;
+    if (/^---[ \t]*$/.test(contentRaw.slice(lineStart, lineEnd))) {
+      yamlEnd = lineStart;
+      contentStart = lineEnd;
+      break;
     }
+    if (nextLineBreak === -1) {
+      break;
+    }
+    lineStart = nextLineBreak + 1;
+  }
+  if (yamlEnd === -1) {
+    return ret;
+  }
+
+  const yaml = contentRaw.slice(yamlStart, yamlEnd);
+  try {
+    const isEmptyMapping = yaml
+      .split("\n")
+      .every((line) => /^[ \t]*(?:#.*)?$/.test(line));
+    const parsed: unknown = isEmptyMapping ? {} : YAML.parse(yaml);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return ret;
+    }
+
+    const meta: Record<string, unknown> = {
+      ...(parsed as Record<string, unknown>),
+    };
+    const hasOwn = Object.prototype.hasOwnProperty;
+    if (
+      (hasOwn.call(meta, "$version") &&
+        (typeof meta.$version !== "number" ||
+          !Number.isFinite(meta.$version))) ||
+      (hasOwn.call(meta, "$libraryID") &&
+        (typeof meta.$libraryID !== "number" ||
+          !Number.isFinite(meta.$libraryID))) ||
+      (hasOwn.call(meta, "$itemKey") && typeof meta.$itemKey !== "string")
+    ) {
+      return ret;
+    }
+    if (!hasOwn.call(meta, "$version")) {
+      meta.$version = -1;
+    }
+
+    ret.meta = meta as MDStatus["meta"];
+    ret.content = contentRaw.slice(contentStart);
+  } catch (e) {
+    ztoolkit.log(e);
   }
   return ret;
 }
